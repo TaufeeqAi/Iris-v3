@@ -15,6 +15,8 @@ import base64
 from libp2p.crypto.keys import generate_key_pair
 from libp2p.peer.id import ID as PeerID
 from multiaddr import Multiaddr 
+from google.adk.agents import Message # For ADK message payload
+
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +170,7 @@ async def create_dynamic_agent_instance(agent_config: AgentConfig, local_mode: b
         "multi_search": {"url": f"{mcp_base_url_prefix}0{mcp_suffix}", "transport": "streamable_http"},
         "finance": {"url": f"{mcp_base_url_prefix}1{mcp_suffix}", "transport": "streamable_http"},
         "rag": {"url": f"{mcp_base_url_prefix}2{mcp_suffix}", "transport": "streamable_http"},
+        "agent_marketplace": {"url": f"{mcp_base_url_prefix}6{mcp_suffix}", "transport": "streamable_http"},
     }
 
     discord_bot_id = None
@@ -264,6 +267,36 @@ async def create_dynamic_agent_instance(agent_config: AgentConfig, local_mode: b
                         logger.info(f"Fetched Telegram Bot ID for agent '{agent_name}': {telegram_bot_id}")
                     except Exception as e:
                         logger.warning(f"Failed to fetch Telegram Bot ID for agent '{agent_name}': {e}", exc_info=True)
+            
+            # --- Agent Self-Registration with Agent Marketplace MCP ---
+            register_tool = next((t for t in agent_tools_raw if t.name == "register_agent_capability"), None)
+            if register_tool:
+                try:
+                    agent_capabilities = ["chat", "general_query"]
+                    if "finance" in agent_mcp_config:
+                        agent_capabilities.append("finance_queries")
+                    if "rag" in agent_mcp_config:
+                        agent_capabilities.append("knowledge_retrieval")
+                    if "telegram" in agent_mcp_config:
+                        agent_capabilities.append("telegram_bot")
+                    if "discord" in agent_mcp_config:
+                        agent_capabilities.append("discord_bot")
+
+                    internal_invoke_url = f"http://cyrene-agent:8000/internal/agents/{agent_config.id}"
+
+                    logger.info(f"Agent '{agent_name}' (ID: {agent_config.id}) registering with agent marketplace at {internal_invoke_url}...")
+                    registration_result = await register_tool.ainvoke({
+                        "peer_id": agent_config.id,
+                        "name": agent_name,
+                        "bio": agent_config.bio,
+                        "capabilities": agent_capabilities,
+                        "internal_url": internal_invoke_url
+                    })
+                    logger.info(f"Agent registration result: {registration_result}")
+                except Exception as e:
+                    logger.error(f"Failed to register agent '{agent_name}' with agent marketplace: {e}", exc_info=True)
+            else:
+                logger.warning(f"Agent '{agent_name}' could not find 'register_agent_capability' tool. Agent will not be registered in marketplace.")
 
         else:
             logger.warning(f"No tools fetched for agent '{agent_name}'. This might mean configured MCP servers are down or no tools are exposed for configured services.")

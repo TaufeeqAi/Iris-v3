@@ -1,0 +1,18 @@
+# mcp-servers/base-mcp/Dockerfile.base
+FROM python:3.12-slim-bookworm
+
+
+# Set working directory inside the container
+WORKDIR /app
+
+# Copy the project's root requirements.txt (contains ALL dependencies)
+COPY requirements.txt .
+
+# Install ALL Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the common utilities folder
+COPY common /app/common
+
+# Expose a generic port. Specific services will override/re-expose this.
+EXPOSE 8000

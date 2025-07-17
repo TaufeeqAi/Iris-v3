@@ -1,0 +1,146 @@
+# Ignore __pycache__/, .env, *.pyc, .DS_Store
+.env
+k8s/secrets.yaml
+
+.root_venv/
+
+# Python
+##########
+sentence_transformers_cache/
+chroma/
+bot_session.session
+.venv_root/
+agents.db
+k8s/secrets.yaml
+.env
+examples_characters/
+scripts/setup_webhooks.sh
+
+bot_session_79594204.session
+bot_session_78399462.session
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+docs/
+# PyInstaller
+#  Usually these files are created by a CI server and aren't committed to VCS
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+pytestdebug.log
+
+# Translations
+*.mo
+*.pot
+*.po
+
+# Django stuff
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff
+instance/
+.webassets-cache
+
+# Scrapy stuff
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+#  https://pipenv.pypa.io/en/latest/basics/#pipfile-lock
+Pipfile.lock
+
+# virtualenv
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# mypy, ruff and other caches
+.mypy_cache/
+.ruff_cache/
+
+# IDE / Editor
+###############
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+
+# OS-generated files
+##################
+.DS_Store
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Secrets & Credentials - Keep all secrets out of VCS.
+#####################################################
+k8s/secrets.yaml
+*.pem
+*.key
+credentials.json
+secrets.json

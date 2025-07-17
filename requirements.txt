@@ -1,0 +1,31 @@
+# Core web frameworks and servers
+fastapi
+starlette
+uvicorn[standard]
+httpx
+
+# MCP (Model Context Protocol)
+fastmcp 
+
+# Agent Framework
+langchain-mcp-adapters
+langgraph
+
+# Langchain and LLM integration (core components only, no specific integrations)
+langchain
+langchain-community
+langchain-core
+langchain-groq
+
+# Environment management
+python-dotenv
+discord.py
+telethon
+langchain_chroma
+sentence_transformers
+langchain_huggingface
+
+#new added 
+google-adk
+libp2p
+pydantic

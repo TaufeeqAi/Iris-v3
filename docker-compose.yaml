@@ -1,0 +1,226 @@
+services:
+  # Base MCP Image (used by other MCPs)
+  # This service isn't directly run, but its image is built and used by others.
+  # We define it here to ensure its build context is correct.
+  base-mcp-builder:
+    build:
+      context: .
+      dockerfile: mcp-servers/base-mcp/Dockerfile.base
+    image: base-mcp:latest # Tag for other Dockerfiles to use
+    networks:
+      - agent-network
+
+  # Core FastMCP Server
+  fastmcp-core:
+    build:
+      context: . # Build from the root context
+      dockerfile: Dockerfile.fastmcp_core
+    ports:
+      - "9000:9000" # Expose to host for direct testing if needed
+    environment:
+      # No specific env vars needed for core-mcp, it just registers tools
+      # but if it needs BOT_API_BASE_URL for any reason, add it.
+      BOT_API_BASE_URL: "http://cyrene-agent:8000" # Use service name 'cyrene-agent' for internal comms
+    volumes:
+      - ./fastmcp_core_server.py:/app/fastmcp_core_server.py
+      - ./common:/app/common
+    depends_on:
+      - base-mcp-builder # Ensure base image is built first
+    networks:
+      - agent-network
+
+  # Main Agent API (cyrene-agent) - Now also an ADK Agent
+  cyrene-agent:
+    build:
+      context: ./agent # Build from the cyrene-agent repo directory
+      dockerfile: Dockerfile 
+    ports:
+      - "8000:8000" # Expose to host for frontend and external webhooks
+      - "8001:8001" # New port for internal ADK A2A communication (adjust as needed)
+    environment:
+      LOCAL_MODE: "true"
+      FASTMCP_BASE_URL: "http://fastmcp-core:9000"
+      BOT_API_BASE_URL: "http://cyrene-agent:8000" # Self-reference for webhooks
+      DISCORD_EVENTS_ENDPOINT: "http://cyrene-agent:8000/discord/receive_message"
+      SQLITE_DB_PATH: "/app/agents.db" # Persistent path inside container
+      # Secrets from .env will be injected by Docker Compose
+      GROQ_API_KEY: "${GROQ_API_KEY}"
+      # New: ADK A2A Server URL for agent registration and delegation
+      ADK_A2A_SERVER_URL: "http://agent-marketplace-mcp:9005" # New service
+    volumes:
+      - ./cyrene-agent/bot:/app/bot
+      - ./common:/app/common
+      - agents_data:/app/agents_data # Persistent volume for SQLite DB
+    depends_on:
+      - fastmcp-core
+      - agent-marketplace-mcp # New dependency: agent needs marketplace to register
+    networks:
+      - agent-network
+
+  # Specialized MCP Servers (using base-mcp as FROM)
+  web-mcp:
+    build:
+      context: ./mcp-servers/web-mcp # Build from its own repo directory
+      dockerfile: Dockerfile
+    ports:
+      - "9001:9000" # Map to different host port for local access
+    environment:
+      LOCAL_MODE: "true"
+      FASTMCP_BASE_URL: "http://fastmcp-core:9000"
+      SERPAPI_KEY: "${SERPAPI_KEY}"
+      NEWSAPI_KEY: "${NEWSAPI_KEY}"
+      OPENWEATHER_API_KEY: "${OPENWEATHER_API_KEY}"
+      RAPIDAPI_KEY: "${RAPIDAPI_KEY}"
+      STACKEXCHANGE_KEY: "${STACKEXCHANGE_KEY}"
+    volumes:
+      - ./mcp-servers/web-mcp:/app/mcp-servers/web-mcp
+      - ./common:/app/common
+    depends_on:
+      - fastmcp-core
+      - base-mcp-builder
+    networks:
+      - agent-network
+
+  finance-mcp:
+    build:
+      context: ./mcp-servers/finance-mcp
+      dockerfile: Dockerfile
+    ports:
+      - "9002:9000"
+    environment:
+      LOCAL_MODE: "true"
+      FASTMCP_BASE_URL: "http://fastmcp-core:9000"
+      FINNHUB_API_KEY: "${FINNHUB_API_KEY}"
+      QUANDL_API_KEY: "${QUANDL_API_KEY}"
+    volumes:
+      - ./mcp-servers/finance-mcp:/app/mcp-servers/finance-mcp
+      - ./common:/app/common
+    depends_on:
+      - fastmcp-core
+      - base-mcp-builder
+    networks:
+      - agent-network
+
+  rag-mcp:
+    build:
+      context: ./mcp-servers/rag-mcp
+      dockerfile: Dockerfile
+    ports:
+      - "9003:9000"
+    environment:
+      LOCAL_MODE: "true"
+      FASTMCP_BASE_URL: "http://fastmcp-core:9000"
+      GROQ_API_KEY: "${GROQ_API_KEY}" # RAG MCP needs Groq for embeddings if not local
+      CHROMA_DB_PATH: "/app/chroma" # Path inside container for persistence
+    volumes:
+      - ./mcp-servers/rag-mcp:/app/mcp-servers/rag-mcp
+      - ./common:/app/common
+      - rag_data_volume:/app/chroma # Mount named volume for persistence
+    depends_on:
+      - fastmcp-core
+      - base-mcp-builder
+    networks:
+      - agent-network
+
+  telegram-mcp:
+    build:
+      context: ./mcp-servers/telegram-mcp
+      dockerfile: Dockerfile
+    ports:
+      - "9004:9000"
+    environment:
+      LOCAL_MODE: "true"
+      FASTMCP_BASE_URL: "http://fastmcp-core:9000"
+      BOT_API_BASE_URL: "http://cyrene-agent:8000" # For forwarding messages
+    volumes:
+      - ./mcp-servers/telegram-mcp:/app/mcp-servers/telegram-mcp
+      - ./common:/app/common
+    depends_on:
+      - fastmcp-core
+      - cyrene-agent # Needs bot-api to be running for webhooks
+      - base-mcp-builder
+    networks:
+      - agent-network
+
+  discord-mcp:
+    build:
+      context: ./mcp-servers/discord-mcp
+      dockerfile: Dockerfile
+    ports:
+      - "9005:9000"
+    environment:
+      LOCAL_MODE: "true"
+      FASTMCP_BASE_URL: "http://fastmcp-core:9000"
+      BOT_API_BASE_URL: "http://cyrene-agent:8000" # For forwarding messages
+    volumes:
+      - ./mcp-servers/discord-mcp:/app/mcp-servers/discord-mcp
+      - ./common:/app/common
+    depends_on:
+      - fastmcp-core
+      - cyrene-agent # Needs bot-api to be running for webhooks
+      - base-mcp-builder
+    networks:
+      - agent-network
+
+  # NEW SERVICE: Google ADK A2A Server / Agent Marketplace MCP
+  agent-marketplace-mcp:
+    build:
+      context: ./mcp-servers/agent-maketplace-mcp # Build from its new directory
+      dockerfile: Dockerfile # This Dockerfile needs to be created in this directory
+    ports:
+      - "9006:9005" # Expose ADK A2A server on host port 9006 (internal ADK port 9005)
+    environment:
+      LOCAL_MODE: "true"
+      FASTMCP_BASE_URL: "http://fastmcp-core:9000"
+      # ADK specific env vars if needed for internal ADK auth or LLM
+      GROQ_API_KEY: "${GROQ_API_KEY}" # If ADK agent itself needs an LLM
+      # libp2p specific env vars for its host
+      LIBP2P_LISTEN_ADDRS: "/ip4/0.0.0.0/tcp/4001" # libp2p default port
+    volumes:
+      - ./mcp-servers/agent-marketplace-mcp:/app/mcp-servers/agent-marketplace-mcp
+      - ./common:/app/common
+      - agent_marketplace_data:/app/data # For libp2p peer store, ADK runtime data
+    depends_on:
+      - fastmcp-core
+    networks:
+      - agent-network
+
+  # Frontend UI
+  frontend:
+    build:
+      context: ./frontend # Build from the frontend repo directory
+      dockerfile: Dockerfile # This Dockerfile needs to be created in agent-UI
+    ports:
+      - "8501:8501" # Streamlit default port
+    environment:
+      FASTAPI_URL: "http://cyrene-agent:8000" # Frontend talks to bot-api
+    volumes:
+      - ./agent-UI:/app/frontend
+    depends_on:
+      - cyrene-agent
+    networks:
+      - agent-network
+
+  # RAG Data Loader (Run as a one-off job)
+  # This service is typically run once to populate the volume.
+  # You run it manually: `docker compose run rag-data-loader`
+  rag-data-loader:
+    build:
+      context: . # Build from root context
+      dockerfile: Dockerfile.rag_data_loader
+    environment:
+      CHROMA_DB_PATH: "/app/chroma"
+    volumes:
+      - ./docs:/app/data # Mount your source documents (assuming 'docs' is at project root)
+      - rag_data_volume:/app/chroma # Mount the same named volume as rag-mcp
+    networks:
+      - agent-network
+
+volumes:
+  rag_data_volume: {} # Named volume for RAG persistence
+  agents_data: {} # Named volume for SQLite DB persistence (for cyrene-agent)
+  agent_marketplace_data: {} # Named volume for ADK/libp2p data (for agent-marketplace-mcp)
+
+networks:
+  agent-network:
+    driver: bridge # Default bridge network for inter-service communication

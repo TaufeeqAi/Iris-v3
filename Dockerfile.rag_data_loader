@@ -1,0 +1,16 @@
+# Dockerfile.rag_data_loader
+FROM base-mcp:latest
+
+WORKDIR /app
+
+# Copy the data loader's specific requirements.txt and install them
+COPY scripts/rag_data_loader_requirements.txt /app/scripts/rag_data_loader_requirements.txt
+RUN pip install --no-cache-dir -r scripts/rag_data_loader_requirements.txt 
+
+# Create a directory for your source documents and copy them
+COPY docs /app/data
+
+# Copy the data loading script
+COPY scripts/load_initial_rag_data.py /app/scripts/load_initial_rag_data.py
+
+CMD ["python", "scripts/load_initial_rag_data.py"]

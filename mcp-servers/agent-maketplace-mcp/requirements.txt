@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+httpx
+fastmcp
+#google-adk # Core ADK library
+#libp2p # For libp2p node, DHT, and Peer ID management
+python-dotenv

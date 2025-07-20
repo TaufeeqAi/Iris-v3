@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 
 class AgentSecrets(BaseModel):
@@ -23,3 +23,26 @@ class AgentConfig(BaseModel):
     knowledge: Optional[str] = None
     persona: Optional[str] = None
     secrets: AgentSecrets = Field(default_factory=AgentSecrets) # Nested secrets model
+
+
+class AgentCard(BaseModel):
+    """
+    Represents a discoverable agent in the decentralized marketplace.
+    Matches the common/models.py AgentCard.
+    """
+    peer_id: str
+    name: str
+    bio: str
+    capabilities: List[str]
+    internal_url: str # Internal URL for ADK A2A server to invoke this agent
+    framework: str = "langgraph" # Added framework for cross-framework A2A
+
+class Message(BaseModel):
+    """
+    Our custom Pydantic model for inter-agent messages.
+    This replaces the ADK's internal Message class for our A2A communication.
+    """
+    text: str = Field(..., description="The main text content of the message.")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Optional metadata associated with the message.")
+    # Add other fields if your agents need to exchange more complex data (e.g., audio, image_url, tool_calls)
+    # Example: tool_calls: Optional[List[Dict[str, Any]]] = None

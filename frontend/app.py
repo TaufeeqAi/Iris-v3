@@ -1,229 +1,244 @@
+# agent-UI/app.py
+
 import streamlit as st
 import requests
 import json
 import os
-from typing import Optional # <--- ADD THIS IMPORT
+from typing import List, Dict, Any, Optional
+from pydantic import BaseModel # For AgentCard model
 
 # --- Configuration ---
-# Ensure your FastAPI backend is running on this URL
-FASTAPI_URL = os.getenv("FASTAPI_URL", "http://localhost:8000")
+# Get BOT_API_BASE_URL from environment variable
+BOT_API_BASE_URL = os.getenv("BOT_API_BASE_URL", "http://localhost:8000")
 
-# --- Streamlit Page Configuration ---
-st.set_page_config(
-    page_title="Multi-Agent Bot Console",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# --- Pydantic Models (Re-define or import if common/models.py is accessible) ---
+# For simplicity, redefine AgentCard here. In a real multi-repo setup,
+# you'd ideally share this model via a common Python package or direct import if paths allow.
+class AgentSecrets(BaseModel):
+    groq_api_key: Optional[str] = None
+    telegram_bot_token: Optional[str] = None
+    telegram_api_id: Optional[int] = None
+    telegram_api_hash: Optional[str] = None
+    discord_bot_token: Optional[str] = None
+    libp2p_private_key: Optional[str] = None # Added in Phase 1
 
-# --- Session State Initialization ---
-# This dictionary stores variables that persist across reruns of the Streamlit app
-if 'current_page' not in st.session_state:
-    st.session_state.current_page = 'create_agent' # Default page
-if 'selected_agent_id' not in st.session_state:
-    st.session_state.selected_agent_id = None
-if 'chat_history' not in st.session_state:
-    st.session_state.chat_history = {} # {agent_id: [{"role": "user/assistant", "content": "message"}]}
-if 'agents' not in st.session_state:
-    st.session_state.agents = [] # Cached list of agents
+class AgentConfig(BaseModel):
+    id: Optional[str] = None # libp2p PeerID
+    name: str
+    bio: Optional[str] = None
+    persona: Optional[str] = None
+    secrets: AgentSecrets
 
-# --- Helper Functions for FastAPI Communication ---
+class AgentCard(BaseModel):
+    """
+    Represents a discoverable agent in the decentralized marketplace.
+    Matches the common/models.py AgentCard.
+    """
+    peer_id: str
+    name: str
+    bio: str
+    capabilities: List[str]
+    internal_url: str # Internal URL for ADK A2A server to invoke this agent
 
-def send_request_to_fastapi(method: str, endpoint: str, data: Optional[dict] = None):
-    """Sends an HTTP request to the FastAPI backend."""
-    url = f"{FASTAPI_URL}/{endpoint}"
+
+# --- API Client Functions ---
+
+def create_agent_api(agent_data: Dict[str, Any]) -> requests.Response:
+    """Sends a request to create a new agent."""
+    url = f"{BOT_API_BASE_URL}/agents/create"
+    return requests.post(url, json=agent_data)
+
+def list_agents_api() -> List[Dict[str, Any]]:
+    """Fetches all registered agents."""
+    url = f"{BOT_API_BASE_URL}/agents/list"
     try:
-        if method.lower() == 'post':
-            response = requests.post(url, json=data)
-        elif method.lower() == 'get':
-            response = requests.get(url)
-        else:
-            st.error(f"Unsupported HTTP method: {method}")
-            return None
-
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        response = requests.get(url)
+        response.raise_for_status()
         return response.json()
-    except requests.exceptions.ConnectionError:
-        st.error(f"Could not connect to FastAPI backend at {FASTAPI_URL}. Please ensure it is running.")
-        return None
-    except requests.exceptions.HTTPError as e:
-        st.error(f"FastAPI error: {e.response.status_code} - {e.response.text}")
-        return None
-    except json.JSONDecodeError:
-        st.error(f"Failed to decode JSON response from FastAPI: {response.text}")
-        return None
-    except Exception as e:
-        st.error(f"An unexpected error occurred: {e}")
-        return None
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error listing agents: {e}")
+        return []
 
-def get_agents():
-    """Fetches list of agents from FastAPI backend."""
-    response = send_request_to_fastapi('get', 'agents/list')
-    if response:
-        st.session_state.agents = response # Update cached agents
-    return st.session_state.agents
+def chat_with_agent_api(agent_id: str, message: str) -> str:
+    """Sends a message to a specific agent and returns its response."""
+    url = f"{BOT_API_BASE_URL}/agents/{agent_id}/chat"
+    try:
+        response = requests.post(url, json={"message": message})
+        response.raise_for_status()
+        return response.json().get("response", "No response.")
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error chatting with agent: {e}")
+        return f"Error: {e}"
 
-def create_agent_on_backend(agent_data: dict):
-    """Sends new agent data to FastAPI backend to create an agent."""
-    response = send_request_to_fastapi('post', 'agents/create', agent_data)
-    if response:
-        st.success(f"Agent '{response.get('name', 'Unknown')}' created successfully!")
-        # Refresh the list of agents in the sidebar
-        st.session_state.agents = get_agents()
-        st.session_state.current_page = 'list_agents' # Navigate to list after creation
-        st.rerun() # Rerun to update sidebar
-    return response
+def list_marketplace_agents_api(capabilities: Optional[List[str]] = None) -> List[AgentCard]:
+    """
+    Calls the bot-api to list agents from the decentralized marketplace.
+    """
+    url = f"{BOT_API_BASE_URL}/agents/marketplace/list"
+    params = {}
+    if capabilities:
+        params["capabilities"] = ",".join(capabilities) # Pass as comma-separated string
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        # Parse the raw JSON list into AgentCard objects
+        return [AgentCard(**agent_data) for agent_data in response.json()]
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error listing agents from marketplace: {e}")
+        return []
 
-def chat_with_agent_on_backend(agent_id: str, message: str):
-    """Sends a chat message to a specific agent and gets a response."""
-    endpoint = f"agents/{agent_id}/chat"
-    data = {"message": message}
-    response = send_request_to_fastapi('post', endpoint, data)
-    if response:
-        return response.get("response", "No response from agent.")
-    return "Error: Could not get response from agent."
+# --- Streamlit UI Components ---
 
-# --- UI Components ---
+def agent_management_page():
+    st.header("🤖 Agent Management")
 
-def create_agent_page():
-    """Renders the 'Create New Agent' form."""
-    st.title("➕ Create New Agent")
-    st.write("Upload a JSON configuration file or fill the form to create a new AI agent.")
-
-    # JSON Upload Option
-    uploaded_file = st.file_uploader("Upload character.json file", type="json")
-    if uploaded_file is not None:
-        try:
-            file_content = json.load(uploaded_file)
-            st.session_state.uploaded_agent_config = file_content
-            st.success("JSON file uploaded successfully! Review details below.")
-        except json.JSONDecodeError:
-            st.error("Invalid JSON file. Please upload a valid JSON.")
-            st.session_state.uploaded_agent_config = None
-
-    st.subheader("Agent Details")
+    st.subheader("Create New Agent")
     with st.form("create_agent_form"):
-        # Pre-fill from uploaded file if available
-        default_name = st.session_state.uploaded_agent_config.get('name', '') if 'uploaded_agent_config' in st.session_state else ''
-        default_bio = st.session_state.uploaded_agent_config.get('bio', '') if 'uploaded_agent_config' in st.session_state else ''
-        default_knowledge = st.session_state.uploaded_agent_config.get('knowledge', '') if 'uploaded_agent_config' in st.session_state else ''
-        default_persona = st.session_state.uploaded_agent_config.get('persona', '') if 'uploaded_agent_config' in st.session_state else ''
-        default_secrets = json.dumps(st.session_state.uploaded_agent_config.get('secrets', {}), indent=2) if 'uploaded_agent_config' in st.session_state else json.dumps({
-            "discord_bot_token": "YOUR_DISCORD_BOT_TOKEN",
-            "telegram_api_id": "YOUR_TELEGRAM_API_ID",
-            "telegram_api_hash": "YOUR_TELEGRAM_API_HASH",
-            "telegram_bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
-            "serpapi_api_key": "YOUR_SERPAPI_API_KEY",
-            "newsapi_org_api_key": "YOUR_NEWSAPI_ORG_API_KEY",
-            "finnhub_api_key": "YOUR_FINNHUB_API_KEY",
-            "quandl_api_key": "YOUR_QUANDL_API_KEY",
-            "cohere_api_key": "YOUR_COHERE_API_KEY",
-            "groq_api_key": "YOUR_GROQ_API_KEY" # Optional, can use global
-        }, indent=2)
+        agent_name = st.text_input("Agent Name", key="create_name")
+        agent_bio = st.text_area("Agent Bio (Optional)", key="create_bio")
+        agent_persona = st.text_area("Agent Persona (Optional)", key="create_persona")
+        
+        st.markdown("---")
+        st.subheader("Agent Secrets (API Keys)")
+        groq_api_key = st.text_input("Groq API Key", type="password", key="create_groq")
+        
+        st.markdown("#### Telegram Secrets (Optional)")
+        telegram_bot_token = st.text_input("Telegram Bot Token", type="password", key="create_tg_token")
+        telegram_api_id = st.number_input("Telegram API ID", min_value=0, step=1, key="create_tg_api_id")
+        telegram_api_hash = st.text_input("Telegram API Hash", type="password", key="create_tg_api_hash")
 
-        name = st.text_input("Agent Name", value=default_name, help="A unique name for your agent.")
-        bio = st.text_area("Bio", value=default_bio, help="A brief description of your agent's background or purpose.")
-        knowledge = st.text_area("Knowledge Areas", value=default_knowledge, help="Specific domains or topics your agent is knowledgeable about.")
-        persona = st.text_area("Persona", value=default_persona, help="How your agent should behave (e.g., 'friendly', 'formal', 'humorous').")
-        secrets_json_str = st.text_area("Secrets (JSON)", value=default_secrets, height=250, help="API keys for tools. Leave blank or remove keys for tools you don't want.")
+        st.markdown("#### Discord Secrets (Optional)")
+        discord_bot_token = st.text_input("Discord Bot Token", type="password", key="create_dc_token")
 
         submitted = st.form_submit_button("Create Agent")
 
         if submitted:
+            secrets_data = AgentSecrets(
+                groq_api_key=groq_api_key if groq_api_key else None,
+                telegram_bot_token=telegram_bot_token if telegram_bot_token else None,
+                telegram_api_id=telegram_api_id if telegram_api_id > 0 else None,
+                telegram_api_hash=telegram_api_hash if telegram_api_hash else None,
+                discord_bot_token=discord_bot_token if discord_bot_token else None,
+            )
+            agent_data = AgentConfig(
+                name=agent_name,
+                bio=agent_bio if agent_bio else None,
+                persona=agent_persona if agent_persona else None,
+                secrets=secrets_data
+            )
+            
             try:
-                secrets_dict = json.loads(secrets_json_str)
-                agent_data = {
-                    "name": name,
-                    "bio": bio,
-                    "knowledge": knowledge,
-                    "persona": persona,
-                    "secrets": secrets_dict
-                }
-                create_agent_on_backend(agent_data)
-            except json.JSONDecodeError:
-                st.error("Invalid JSON in Secrets field. Please correct it.")
+                response = create_agent_api(agent_data.dict())
+                response.raise_for_status()
+                st.success(f"Agent '{agent_name}' created successfully! ID: {response.json().get('id')}")
+                st.session_state.agents = None # Clear cache to refetch
+            except requests.exceptions.RequestException as e:
+                st.error(f"Failed to create agent: {e}")
             except Exception as e:
-                st.error(f"An error occurred during agent creation: {e}")
+                st.error(f"An unexpected error occurred: {e}")
 
-def chat_page(agent_id: str):
-    """Renders the chat interface for a selected agent."""
-    agents = get_agents() # Refresh agents to get current names
-    agent_name = next((a['name'] for a in agents if a['id'] == agent_id), "Unknown Agent")
-    st.title(f"💬 Chat with {agent_name}")
+    st.subheader("Existing Agents")
+    if 'agents' not in st.session_state or st.session_state.agents is None:
+        st.session_state.agents = list_agents_api()
 
-    if agent_id not in st.session_state.chat_history:
-        st.session_state.chat_history[agent_id] = []
+    if st.session_state.agents:
+        agent_names = {agent['id']: agent['name'] for agent in st.session_state.agents}
+        selected_agent_id = st.selectbox("Select Agent to Chat With", options=list(agent_names.keys()), format_func=lambda x: agent_names[x], key="select_chat_agent")
 
-    # Display chat messages
-    for message in st.session_state.chat_history[agent_id]:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+        if selected_agent_id:
+            st.session_state.selected_agent_id = selected_agent_id
+            st.session_state.selected_agent_name = agent_names[selected_agent_id]
+            st.write(f"Chatting with: **{st.session_state.selected_agent_name}** (ID: `{st.session_state.selected_agent_id}`)")
 
-    # Chat input
-    if prompt := st.chat_input("Say something to your agent..."):
-        # Add user message to history
-        st.session_state.chat_history[agent_id].append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+            # Initialize chat history for the selected agent
+            if f"messages_{selected_agent_id}" not in st.session_state:
+                st.session_state[f"messages_{selected_agent_id}"] = []
 
-        # Get agent response
-        with st.spinner("Agent is thinking..."):
-            agent_response = chat_with_agent_on_backend(agent_id, prompt)
+            # Display chat messages
+            for message in st.session_state[f"messages_{selected_agent_id}"]:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
 
-        # Add agent response to history
-        st.session_state.chat_history[agent_id].append({"role": "assistant", "content": agent_response})
-        with st.chat_message("assistant"):
-            st.markdown(agent_response)
+            # Chat input
+            if prompt := st.chat_input("Say something..."):
+                st.session_state[f"messages_{selected_agent_id}"].append({"role": "user", "content": prompt})
+                with st.chat_message("user"):
+                    st.markdown(prompt)
 
-def list_agents_page():
-    """Renders the list of available agents."""
-    st.title("📋 Available Agents")
-    agents = get_agents() # Fetch latest agents
-
-    if not agents:
-        st.info("No agents created yet. Use the 'Create New Agent' option in the sidebar.")
+                with st.spinner("Agent thinking..."):
+                    agent_response = chat_with_agent_api(selected_agent_id, prompt)
+                
+                st.session_state[f"messages_{selected_agent_id}"].append({"role": "assistant", "content": agent_response})
+                with st.chat_message("assistant"):
+                    st.markdown(agent_response)
     else:
-        for agent in agents:
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.subheader(agent.get('name', 'N/A'))
-                st.write(f"ID: `{agent.get('id', 'N/A')}`")
-                st.write(f"Bio: {agent.get('bio', 'No bio provided.')}")
-                st.write(f"Persona: {agent.get('persona', 'No persona provided.')}")
-            with col2:
-                if st.button(f"Chat with {agent.get('name', 'Agent')}", key=f"chat_{agent.get('id')}"):
-                    st.session_state.selected_agent_id = agent['id']
-                    st.session_state.current_page = 'chat'
-                    st.rerun()
-            st.markdown("---")
+        st.info("No agents created yet. Use the form above to create one.")
 
-# --- Sidebar Navigation ---
-with st.sidebar:
-    st.header("Agent Console")
-    if st.button("➕ Create New Agent", use_container_width=True):
-        st.session_state.current_page = 'create_agent'
-        st.session_state.selected_agent_id = None # Clear selected agent
-        st.rerun()
+def agent_marketplace_page():
+    st.header("🌐 Agent Marketplace")
+    st.write("Discover and connect with agents in the decentralized network.")
 
-    st.markdown("---")
-    st.subheader("Your Agents")
+    # Filter by capabilities
+    available_capabilities = ["chat", "general_query", "finance_queries", "knowledge_retrieval", "telegram_bot", "discord_bot"]
+    selected_capabilities = st.multiselect(
+        "Filter by Capabilities",
+        options=available_capabilities,
+        key="marketplace_capabilities"
+    )
 
-    # Fetch and display agents in sidebar
-    agents_in_sidebar = get_agents()
-    if not agents_in_sidebar:
-        st.info("No agents yet.")
+    if st.button("List Agents from Marketplace", key="list_marketplace_agents_button"):
+        with st.spinner("Searching marketplace..."):
+            st.session_state.marketplace_agents = list_marketplace_agents_api(selected_capabilities)
+    
+    if 'marketplace_agents' in st.session_state and st.session_state.marketplace_agents:
+        st.subheader("Discovered Agents")
+        for agent_card in st.session_state.marketplace_agents:
+            with st.expander(f"**{agent_card.name}** (ID: `{agent_card.peer_id[:10]}...`)"):
+                st.write(f"**Bio:** {agent_card.bio}")
+                st.write(f"**Capabilities:** {', '.join(agent_card.capabilities)}")
+                
+                # "Connect with Agent" Button
+                if st.button(f"Connect with {agent_card.name}", key=f"connect_{agent_card.peer_id}"):
+                    st.session_state.selected_agent_id = agent_card.peer_id
+                    st.session_state.selected_agent_name = agent_card.name
+                    st.session_state.page = "Agent Management" # Switch back to chat page
+                    st.success(f"Switched to chat with {agent_card.name}. Go to 'Agent Management' tab.")
+                    st.experimental_rerun() # Rerun to switch page
+
     else:
-        for agent in agents_in_sidebar:
-            if st.button(agent.get('name', 'Unnamed Agent'), key=f"sidebar_agent_{agent.get('id')}", use_container_width=True):
-                st.session_state.selected_agent_id = agent['id']
-                st.session_state.current_page = 'chat'
-                st.rerun()
+        st.info("No agents discovered in the marketplace yet, or try different filters.")
 
-# --- Main Content Rendering ---
-if st.session_state.current_page == 'create_agent':
-    create_agent_page()
-elif st.session_state.current_page == 'chat' and st.session_state.selected_agent_id:
-    chat_page(st.session_state.selected_agent_id)
-else: # Default or if no agent selected for chat
-    list_agents_page()
+    st.subheader("Share Your Agent (Conceptual)")
+    st.write("This feature will allow you to make your created agents discoverable in the decentralized marketplace.")
+    st.write("*(Implementation Note: This would involve calling a backend endpoint to publish the agent's PeerID and capabilities to the libp2p DHT via the agent-marketplace-mcp.)*")
+    
+    # Placeholder for share agent functionality
+    if 'agents' in st.session_state and st.session_state.agents:
+        shareable_agent_ids = {agent['id']: agent['name'] for agent in st.session_state.agents}
+        selected_agent_to_share = st.selectbox(
+            "Select your agent to share to the marketplace",
+            options=list(shareable_agent_ids.keys()),
+            format_func=lambda x: shareable_agent_ids[x],
+            key="select_agent_to_share"
+        )
+        if st.button(f"Share '{shareable_agent_ids.get(selected_agent_to_share, '')}'", key="share_agent_button"):
+            st.info(f"Agent '{shareable_agent_ids[selected_agent_to_share]}' (ID: {selected_agent_to_share}) is conceptually shared. Backend integration needed to publish to DHT.")
+            # In Phase 4, you'd call a new API endpoint here:
+            # requests.post(f"{BOT_API_BASE_URL}/agents/{selected_agent_to_share}/share_to_marketplace")
+
+
+# --- Main App Logic ---
+st.set_page_config(layout="wide", page_title="Multi-Agent Bot")
+st.title("Multi-Agent Bot System")
+
+# Page selection using radio buttons or sidebar
+if 'page' not in st.session_state:
+    st.session_state.page = "Agent Management"
+
+page_selection = st.sidebar.radio("Navigation", ["Agent Management", "Agent Marketplace"])
+
+if page_selection == "Agent Management":
+    agent_management_page()
+elif page_selection == "Agent Marketplace":
+    agent_marketplace_page()
 

@@ -1,17 +1,21 @@
 import logging
 import json
 import re
-from typing import List, Any, TypedDict, Annotated, Dict
+from typing import List, Any, TypedDict, Annotated, Dict, Optional
 
 from langchain_groq import ChatGroq
 from langchain.tools import BaseTool
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langgraph.graph import StateGraph, END
 
+# ADK imports
+from google.adk.agents.base_agent import BaseAgent
+from google.adk.runners import Runner as AgentRuntime
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
-from google.adk.agents import CustomAgent, Message 
-from google.adk.io import FileStore 
-from google.adk.io import MemoryStore 
+from agent.models.agent_config import Message as AppMessage # Renamed for clarity to avoid conflict
+from pydantic import Field # Import Field for explicit Pydantic field declaration
+
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +31,7 @@ class AgentState(TypedDict):
     messages: Annotated[List[Any], lambda x, y: x + y] # Accumulate messages
 
 
-MAX_HISTORY_MESSAGES = 10 
+MAX_HISTORY_MESSAGES = 10
 MAX_TOOL_OUTPUT_CHARS = 1500 # Roughly 300-500 words, depending on character density
 # Regex to find and remove the specific <tool-use> tags
 TOOL_USE_TAG_REGEX = re.compile(r'<tool-use>.*?<\/tool-use>\s*')
@@ -75,27 +79,70 @@ def _truncate_tool_output(output: Any, max_chars: int = MAX_TOOL_OUTPUT_CHARS) -
 
 # ——— ADK-wrapped LangGraph agent —————————————————————————————————————
 
-class LangGraphADKAgent(CustomAgent):
+class LangGraphADKAgent(BaseAgent):
+    """
+    A custom agent that uses LangGraph for its internal logic and integrates
+    with Google ADK's runtime and FastMCP for tooling.
+    """
+    # Declare these as Pydantic fields.
+    # Pydantic will handle their assignment and validation automatically
+    # when the instance is created via keyword arguments in __init__.
+    agent_id: str = Field(..., description="Unique ID for the agent.")
+    agent_name: str = Field(..., description="Name of the agent.")
+    agent_bio: str = Field(..., description="Short description of the agent's capabilities.")
+    agent_persona: str = Field(..., description="The persona/system prompt for the LLM.")
+    llm: ChatGroq = Field(..., description="The initialized ChatGroq LLM instance.")
+    mcp_client: MultiServerMCPClient = Field(..., description="The FastMCP client for tool access.")
+    adk_runtime: Optional[AgentRuntime] = Field(default=None, description="The ADK AgentRuntime instance.")
+    tools: List[BaseTool] = Field(..., description="List of LangChain tools available to the agent.")
+    # New: Declare langgraph_runnable as a Pydantic Field
+    langgraph_runnable: Any = Field(default=None, description="The compiled LangGraph runnable.")
+
+
     def __init__(
         self,
-        llm: ChatGroq,
-        tools: List[BaseTool],
-        system_prompt: str,
+        agent_id: str,
         agent_name: str,
-        agent_id: str
+        agent_bio: str,
+        agent_persona: str,
+        llm: ChatGroq,
+        mcp_client: MultiServerMCPClient,
+        tools: List[BaseTool],
+        adk_runtime: Optional[AgentRuntime] = None, # Make it optional in the signature too
+        **kwargs: Any, # Capture any extra kwargs
     ):
-        super().__init__(
-            name=agent_name,
-            description=f"{agent_name}: {system_prompt[:100]}…",
-            tools=tools,
-            store=MemoryStore()
+        # Construct the dictionary of ALL fields that Pydantic needs to validate and assign.
+        # This includes fields inherited from BaseAgent ('name', 'description')
+        # and new fields defined on LangGraphADKAgent.
+        data_for_pydantic = {
+            "name": agent_name,  # Map to BaseAgent's 'name' field
+            "description": agent_bio, # Map to BaseAgent's 'description' field
+            "agent_id": agent_id,
+            "agent_name": agent_name,
+            "agent_bio": agent_bio,
+            "agent_persona": agent_persona,
+            "llm": llm,
+            "mcp_client": mcp_client,
+            "adk_runtime": adk_runtime, # Pass the potentially None value here
+            "tools": tools,
+            "langgraph_runnable": None, # Initialize as None, will be set after super().__init__
+            **kwargs, # Include any other keyword arguments passed
+        }
+        
+        # Call the parent's __init__ with the combined data.
+        # Pydantic's BaseModel.__init__ will handle the validation and assignment
+        # for all fields declared on LangGraphADKAgent (including inherited ones).
+        super().__init__(**data_for_pydantic)
+        
+        # Build LangGraph workflow
+        # Access the fields via self.field as they are now Pydantic fields.
+        # This assignment will now work because langgraph_runnable is a declared Field.
+        self.langgraph_runnable = self._compile_langgraph(
+            llm=self.llm,
+            tools=self.tools,
+            system_prompt=self.agent_persona,
+            agent_name=self.agent_name
         )
-        self.llm = llm
-        self.tools = tools
-        self.system_prompt = system_prompt
-        self.agent_name = agent_name
-        self.agent_id = agent_id
-        self.langgraph_runnable = self._compile_langgraph()
         logger.info(f"[{self.agent_name}] LangGraph-ADKAgent initialized with PeerID: {self.agent_id}")
 
 
@@ -151,7 +198,7 @@ class LangGraphADKAgent(CustomAgent):
         async def call_tool(state: AgentState) -> Dict[str, List[Any]]:
             """
             Executes the tool calls requested by the LLM and returns their outputs.
-            Truncates large tool outputs before adding them to the state.
+            Trun cates large tool outputs before adding them to the state.
             """
             last_message = state['messages'][-1]
             tool_outputs = []
@@ -238,18 +285,32 @@ class LangGraphADKAgent(CustomAgent):
         # compile the graph for agent runner
         return workflow.compile()
     
+    async def _run_async_impl(self, message: Any, context: Any) -> Any:
+            """
+            Implements the core logic for ADK's BaseAgent.
+            This method is called by the ADK AgentRuntime if this agent were registered directly with it.
+            It converts the incoming ADK message to a LangChain HumanMessage and invokes the LangGraph.
+            """
+            logger.info(f"[{self.agent_name}] ADK BaseAgent _run_async_impl called with message: {message}")
+            
+            input_message_content = ""
+            if isinstance(message, str):
+                input_message_content = message
+            elif isinstance(message, dict) and "text" in message:
+                input_message_content = message["text"]
+            elif isinstance(message, AppMessage): 
+                input_message_content = message.text
+            else:
+                input_message_content = str(message) 
 
-    
-    async def act(self, message: Message) -> Message:
-            """
-            The main entry point for the ADK agent.
-            Receives an ADK Message, processes it using LangGraph, and returns an ADK Message.
-            """
-            logger.info(f"[{self.agent_name}] ADK Agent received message: {message.text}")
-            user_message = HumanMessage(content=message.text)
+            user_message = HumanMessage(content=input_message_content)
             initial_langgraph_state = {"messages": [user_message]}
+
             try:
+                # Invoke the LangGraph workflow
+                # The `invoke` method of the compiled LangGraph app returns the final state.
                 langgraph_output = await self.langgraph_runnable.ainvoke(initial_langgraph_state)
+                
                 final_response_content = "I'm sorry, I couldn't process that."
                 if "messages" in langgraph_output and langgraph_output["messages"]:
                     last_message = langgraph_output["messages"][-1]
@@ -259,21 +320,39 @@ class LangGraphADKAgent(CustomAgent):
                         final_response_content = f"Tool executed: {last_message.content}"
                     else:
                         final_response_content = str(last_message)
-                logger.info(f"[{self.agent_name}] LangGraph processed message. Final response: {final_response_content}")
-                return Message(text=final_response_content)
+                
+                logger.info(f"[{self.agent_name}] LangGraph processed message. Final response: {final_response_content[:100]}...")
+                
+                # Return the response in a format compatible with ADK's expectations (simple string or dict)
+                # Since our A2A connector expects common.models.Message, we'll return its dict representation.
+                return AppMessage(text=final_response_content).dict()
+
             except Exception as e:
-                logger.error(f"[{self.agent_name}] Error during ADK agent act: {e}", exc_info=True)
-                return Message(text=f"An error occurred: {e}")
+                logger.error(f"[{self.agent_name}] Error during ADK agent _run_async_impl: {e}", exc_info=True)
+                # Return an error message in a compatible format
+                return AppMessage(text=f"An error occurred: {e}").dict()
+
 
 # ——— Factory function ——————————————————————————————————————————————
-
 async def create_custom_tool_agent(
     llm: ChatGroq,
     tools: List[BaseTool],
-    system_prompt: str,
+    system_prompt: str, # This will be used as agent_persona
     agent_name: str,
-    agent_id: str
+    agent_id: str,
+    mcp_client: MultiServerMCPClient, # Added mcp_client
+    adk_runtime: Optional[AgentRuntime] = None # Made optional with default None
 ) -> LangGraphADKAgent:
     """Factory: returns a LangGraphADKAgent ready for ADK use."""
-    return LangGraphADKAgent(llm, tools, system_prompt, agent_name, agent_id)
-
+    # The system_prompt is now passed as agent_persona to LangGraphADKAgent
+    return LangGraphADKAgent(
+        agent_id=agent_id,
+        agent_name=agent_name,
+        agent_bio=system_prompt, # Using system_prompt as bio/description for BaseAgent
+        agent_persona=system_prompt, # Using system_prompt as persona for LLM
+        llm=llm,
+        mcp_client=mcp_client,
+        tools=tools,
+        adk_runtime=adk_runtime, # Pass the adk_runtime parameter
+        langgraph_runnable=None # Pass as None initially, will be set in __init__
+    )
